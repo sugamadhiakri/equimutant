@@ -4,10 +4,15 @@ import com.equivalentmutant.model.JavaMethod;
 import com.equivalentmutant.model.MethodDependency;
 import com.equivalentmutant.model.SourceLocation;
 import com.github.javaparser.JavaParser;
+import com.github.javaparser.ParseResult;
 import com.github.javaparser.ast.CompilationUnit;
+import com.github.javaparser.ast.body.ClassOrInterfaceDeclaration;
+import com.github.javaparser.ast.body.MethodDeclaration;
 import com.github.javaparser.ast.expr.MethodCallExpr;
 import com.github.javaparser.ast.visitor.VoidVisitorAdapter;
 
+import java.io.File;
+import java.io.FileNotFoundException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
@@ -30,19 +35,44 @@ public class MethodDependencyTracker {
      * @return A list of method call information
      */
     public List<MethodCallInfo> findMethodCalls(JavaMethod method) {
-        String sourceCode = method.getSourceCode();
         List<MethodCallInfo> methodCalls = new ArrayList<>();
         
-        // Parse the method source code
-        Optional<CompilationUnit> cuOpt = parser.parse(sourceCode).getResult();
-        if (!cuOpt.isPresent()) {
-            throw new RuntimeException("Failed to parse method: " + method.getSignature());
+        try {
+            // Instead of parsing just the method source code, we need to parse the entire file
+            // to get proper context for method calls
+            File sourceFile = new File(method.getLocation().getFilePath());
+            if (!sourceFile.exists()) {
+                throw new RuntimeException("Source file not found: " + method.getLocation().getFilePath());
+            }
+            
+            ParseResult<CompilationUnit> parseResult = parser.parse(sourceFile);
+            if (!parseResult.isSuccessful() || !parseResult.getResult().isPresent()) {
+                throw new RuntimeException("Failed to parse file: " + sourceFile.getPath());
+            }
+            
+            CompilationUnit cu = parseResult.getResult().get();
+            
+            // Find the specific method in the compilation unit and analyze its calls
+            cu.findAll(MethodDeclaration.class).stream()
+                .filter(m -> m.getNameAsString().equals(method.getMethodName()))
+                .filter(m -> {
+                    // Try to match the method by signature as well if possible
+                    ClassOrInterfaceDeclaration parent = m.findAncestor(ClassOrInterfaceDeclaration.class).orElse(null);
+                    if (parent == null) {
+                        return true; // If we can't find the parent class, just match by name
+                    }
+                    return parent.getNameAsString().equals(method.getClassName());
+                })
+                .findFirst()
+                .ifPresent(methodDecl -> {
+                    // Create a visitor to extract all method calls within this method
+                    methodDecl.accept(new MethodCallVisitor(sourceFile.getPath(), methodCalls), null);
+                });
+            
+            return methodCalls;
+        } catch (FileNotFoundException e) {
+            throw new RuntimeException("Failed to parse source file: " + e.getMessage(), e);
         }
-        
-        // Visit all method calls
-        cuOpt.get().accept(new MethodCallVisitor(method.getLocation().getFilePath(), methodCalls), null);
-        
-        return methodCalls;
     }
     
     /**
